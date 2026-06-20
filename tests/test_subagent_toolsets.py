@@ -48,6 +48,7 @@ def test_audit_static_leaf_excludes_dangerous_and_web_tools():
 
 
 def test_static_analysis_leaf_exact_tools():
+    # Shared by @debug_static, @test_planner, @patch_reviewer, and @security_gate.
     assert _tools("static_analysis_leaf") == {"read_file", "search_files"}
 
 

@@ -11,6 +11,13 @@ MVP-1 scope:
 MVP-2 Batch 1 additions (internal-only, same constraints):
 - @debug_static, @test_planner, @patch_reviewer
 - all three share the read-only static_analysis_leaf toolset
+
+MVP-2 @security_gate (internal-only, same constraints):
+- @security_gate is a read-only gate-decision reviewer that inspects
+  available evidence and recommends whether the next Central authorization
+  gate may be requested. It is advisory only and never executes the next
+  gate. It reuses the read-only static_analysis_leaf toolset (no
+  delegate_task / write / execute capability).
 """
 
 from __future__ import annotations
@@ -121,12 +128,24 @@ PATCH_REVIEWER_PRESET = SubagentPreset(
 )
 
 
+SECURITY_GATE_PRESET = SubagentPreset(
+    name="@security_gate",
+    toolsets=("static_analysis_leaf",),
+    allow_public_urls=False,
+    allow_file_refs=True,
+    allow_report_artifacts=True,
+    allow_provided_text=True,
+    allowed_ref_types=frozenset({"provided_text", "allowlisted_file", "report_artifact"}),
+)
+
+
 _PRESETS = {
     RESEARCH_PRESET.name: RESEARCH_PRESET,
     AUDIT_STATIC_PRESET.name: AUDIT_STATIC_PRESET,
     DEBUG_STATIC_PRESET.name: DEBUG_STATIC_PRESET,
     TEST_PLANNER_PRESET.name: TEST_PLANNER_PRESET,
     PATCH_REVIEWER_PRESET.name: PATCH_REVIEWER_PRESET,
+    SECURITY_GATE_PRESET.name: SECURITY_GATE_PRESET,
 }
 
 

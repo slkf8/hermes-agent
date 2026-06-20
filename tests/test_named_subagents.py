@@ -191,3 +191,113 @@ def test_mvp2_batch1_allows_allowlisted_file_ref():
             }
         )
         assert err is None, agent_name
+
+
+SECURITY_GATE_AGENT = "@security_gate"
+
+
+def test_security_gate_exists_in_presets():
+    from agent.subagents import _PRESETS
+
+    assert SECURITY_GATE_AGENT in _PRESETS
+    assert _PRESETS[SECURITY_GATE_AGENT].toolsets == ("static_analysis_leaf",)
+
+
+def test_security_gate_routes_with_leaf_role_and_static_analysis_toolset():
+    calls = []
+
+    def fake_runner(**kwargs):
+        calls.append(kwargs)
+        return json.dumps({"results": [{"status": "completed", "summary": "ok"}]})
+
+    r = route_named_subagent(
+        agent_name=SECURITY_GATE_AGENT,
+        goal="review evidence",
+        parent_agent=object(),
+        _delegate_runner=fake_runner,
+    )
+
+    assert r["status"] == STATUS_COMPLETED
+    assert calls[0]["role"] == "leaf"
+    assert calls[0]["toolsets"] == ["static_analysis_leaf"]
+
+
+def test_security_gate_unknown_variant_blocked():
+    r = route_named_subagent(agent_name="@security", goal="x", parent_agent=object())
+    assert r["status"] == STATUS_BLOCKED
+
+
+def test_security_gate_empty_goal_fails_closed():
+    r = route_named_subagent(agent_name=SECURITY_GATE_AGENT, goal="", parent_agent=object())
+    assert r["status"] == STATUS_BLOCKED
+
+
+def test_security_gate_whitespace_goal_fails_closed():
+    r = route_named_subagent(agent_name=SECURITY_GATE_AGENT, goal="   ", parent_agent=object())
+    assert r["status"] == STATUS_BLOCKED
+
+
+def test_security_gate_missing_parent_agent_fails_closed():
+    r = route_named_subagent(agent_name=SECURITY_GATE_AGENT, goal="x", parent_agent=None)
+    assert r["status"] == STATUS_BLOCKED
+
+
+def test_security_gate_rejects_unsafe_toolsets_field():
+    err = validate_raw_named_subagent_request(
+        {"agent_name": SECURITY_GATE_AGENT, "goal": "x", "toolsets": ["terminal"]}
+    )
+    assert err and "unsafe fields" in err
+
+
+def test_security_gate_rejects_public_url():
+    err = validate_raw_named_subagent_request(
+        {
+            "agent_name": SECURITY_GATE_AGENT,
+            "goal": "x",
+            "input_refs": [
+                {"type": "public_url", "ref": "https://example.com", "access": "read_only"}
+            ],
+        }
+    )
+    assert err
+
+
+def test_security_gate_rejects_forbidden_refs():
+    for ref in ["/opt/data/auth.json", "/home/user/.env", "/home/user/config.yaml"]:
+        err = validate_raw_named_subagent_request(
+            {
+                "agent_name": SECURITY_GATE_AGENT,
+                "goal": "x",
+                "input_refs": [
+                    {"type": "allowlisted_file", "ref": ref, "access": "read_only"}
+                ],
+            },
+            allowlisted_roots=["/home/user"],
+        )
+        assert err, ref
+
+
+def test_security_gate_allows_provided_text():
+    err = validate_raw_named_subagent_request(
+        {
+            "agent_name": SECURITY_GATE_AGENT,
+            "goal": "x",
+            "input_refs": [
+                {"type": "provided_text", "ref": "some snippet", "access": "read_only"}
+            ],
+        }
+    )
+    assert err is None
+
+
+def test_security_gate_non_json_runner_failed():
+    def fake_runner(**kwargs):
+        return "not json"
+
+    r = route_named_subagent(
+        agent_name=SECURITY_GATE_AGENT,
+        goal="x",
+        parent_agent=object(),
+        _delegate_runner=fake_runner,
+    )
+    assert r["status"] == STATUS_FAILED

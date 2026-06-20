@@ -14,6 +14,8 @@ def test_audit_static_leaf_static_scope_only_read_search_file_tools():
 
 
 def test_static_analysis_leaf_static_scope_only_read_search_file_tools():
+    # @debug_static, @test_planner, @patch_reviewer, and @security_gate all
+    # share this read-only scope — no delegate_task / write / execute tools.
     assert _tools("static_analysis_leaf") == {"read_file", "search_files"}
 
 

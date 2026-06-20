@@ -117,7 +117,8 @@ TOOLSETS = {
     "static_analysis_leaf": {
         "description": (
             "Restricted read-only static analysis tools shared by the named "
-            "@debug_static, @test_planner, and @patch_reviewer subagents"
+            "@debug_static, @test_planner, @patch_reviewer, and @security_gate "
+            "subagents"
         ),
         "tools": ["read_file", "search_files"],
         "includes": [],
