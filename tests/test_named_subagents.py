@@ -104,3 +104,90 @@ def test_non_json_delegate_result_failed():
         _delegate_runner=fake_runner,
     )
     assert r["status"] == STATUS_FAILED
+
+
+MVP2_BATCH1_AGENTS = ["@debug_static", "@test_planner", "@patch_reviewer"]
+
+
+def test_mvp2_batch1_routes_with_leaf_role_and_static_analysis_toolset():
+    for agent_name in MVP2_BATCH1_AGENTS:
+        calls = []
+
+        def fake_runner(**kwargs):
+            calls.append(kwargs)
+            return json.dumps({"results": [{"status": "completed", "summary": "ok"}]})
+
+        r = route_named_subagent(
+            agent_name=agent_name,
+            goal="x",
+            parent_agent=object(),
+            _delegate_runner=fake_runner,
+        )
+
+        assert r["status"] == STATUS_COMPLETED, agent_name
+        assert calls[0]["role"] == "leaf", agent_name
+        assert calls[0]["toolsets"] == ["static_analysis_leaf"], agent_name
+
+
+def test_mvp2_batch1_rejects_public_url():
+    for agent_name in MVP2_BATCH1_AGENTS:
+        err = validate_raw_named_subagent_request(
+            {
+                "agent_name": agent_name,
+                "goal": "x",
+                "input_refs": [
+                    {"type": "public_url", "ref": "https://example.com", "access": "read_only"}
+                ],
+            }
+        )
+        assert err, agent_name
+
+
+def test_mvp2_batch1_rejects_unsafe_toolsets_field():
+    for agent_name in MVP2_BATCH1_AGENTS:
+        err = validate_raw_named_subagent_request(
+            {"agent_name": agent_name, "goal": "x", "toolsets": ["terminal"]}
+        )
+        assert err and "unsafe fields" in err, agent_name
+
+
+def test_mvp2_batch1_rejects_forbidden_refs():
+    for agent_name in MVP2_BATCH1_AGENTS:
+        for ref in ["/opt/data/auth.json", "/home/user/.env", "/home/user/config.yaml"]:
+            err = validate_raw_named_subagent_request(
+                {
+                    "agent_name": agent_name,
+                    "goal": "x",
+                    "input_refs": [
+                        {"type": "allowlisted_file", "ref": ref, "access": "read_only"}
+                    ],
+                },
+                allowlisted_roots=["/home/user"],
+            )
+            assert err, f"{agent_name} {ref}"
+
+
+def test_mvp2_batch1_empty_goal_fails_closed():
+    for agent_name in MVP2_BATCH1_AGENTS:
+        r = route_named_subagent(agent_name=agent_name, goal="", parent_agent=object())
+        assert r["status"] == STATUS_BLOCKED, agent_name
+
+
+def test_mvp2_batch1_missing_parent_agent_fails_closed():
+    for agent_name in MVP2_BATCH1_AGENTS:
+        r = route_named_subagent(agent_name=agent_name, goal="x", parent_agent=None)
+        assert r["status"] == STATUS_BLOCKED, agent_name
+
+
+def test_mvp2_batch1_allows_allowlisted_file_ref():
+    for agent_name in MVP2_BATCH1_AGENTS:
+        err = validate_raw_named_subagent_request(
+            {
+                "agent_name": agent_name,
+                "goal": "x",
+                "input_refs": [
+                    {"type": "provided_text", "ref": "some snippet", "access": "read_only"}
+                ],
+            }
+        )
+        assert err is None, agent_name

@@ -114,6 +114,15 @@ TOOLSETS = {
         "includes": [],
     },
 
+    "static_analysis_leaf": {
+        "description": (
+            "Restricted read-only static analysis tools shared by the named "
+            "@debug_static, @test_planner, and @patch_reviewer subagents"
+        ),
+        "tools": ["read_file", "search_files"],
+        "includes": [],
+    },
+
     "x_search": {
         "description": (
             "Search X (Twitter) posts and threads via xAI's built-in "

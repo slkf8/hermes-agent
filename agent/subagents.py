@@ -7,6 +7,10 @@ MVP-1 scope:
 - fixed toolsets
 - fail-closed validation
 - no gateway/TUI/RPC/model-callable activation
+
+MVP-2 Batch 1 additions (internal-only, same constraints):
+- @debug_static, @test_planner, @patch_reviewer
+- all three share the read-only static_analysis_leaf toolset
 """
 
 from __future__ import annotations
@@ -84,9 +88,45 @@ AUDIT_STATIC_PRESET = SubagentPreset(
 )
 
 
+DEBUG_STATIC_PRESET = SubagentPreset(
+    name="@debug_static",
+    toolsets=("static_analysis_leaf",),
+    allow_public_urls=False,
+    allow_file_refs=True,
+    allow_report_artifacts=True,
+    allow_provided_text=True,
+    allowed_ref_types=frozenset({"provided_text", "allowlisted_file", "report_artifact"}),
+)
+
+
+TEST_PLANNER_PRESET = SubagentPreset(
+    name="@test_planner",
+    toolsets=("static_analysis_leaf",),
+    allow_public_urls=False,
+    allow_file_refs=True,
+    allow_report_artifacts=True,
+    allow_provided_text=True,
+    allowed_ref_types=frozenset({"provided_text", "allowlisted_file", "report_artifact"}),
+)
+
+
+PATCH_REVIEWER_PRESET = SubagentPreset(
+    name="@patch_reviewer",
+    toolsets=("static_analysis_leaf",),
+    allow_public_urls=False,
+    allow_file_refs=True,
+    allow_report_artifacts=True,
+    allow_provided_text=True,
+    allowed_ref_types=frozenset({"provided_text", "allowlisted_file", "report_artifact"}),
+)
+
+
 _PRESETS = {
     RESEARCH_PRESET.name: RESEARCH_PRESET,
     AUDIT_STATIC_PRESET.name: AUDIT_STATIC_PRESET,
+    DEBUG_STATIC_PRESET.name: DEBUG_STATIC_PRESET,
+    TEST_PLANNER_PRESET.name: TEST_PLANNER_PRESET,
+    PATCH_REVIEWER_PRESET.name: PATCH_REVIEWER_PRESET,
 }
 
 
