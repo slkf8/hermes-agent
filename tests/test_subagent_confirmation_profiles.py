@@ -558,3 +558,18 @@ def test_I_pure_nl_still_cannot_route():
     signals = extract_request_signals_from_text("search the web for python docs")
     td = build_task_descriptor_from_signals(signals)
     assert select_named_subagent_for_task(td).selected_wrapper is None
+
+
+def test_I_safety_fields_order_membership_matches_policy():
+    # Membership-only drift guard. The profile module's local emission-order
+    # tuple must cover exactly the policy module's safety-field set. Order is
+    # intentionally NOT asserted: _SAFETY_FIELDS_ORDER controls assertion
+    # emission order only, while merge/routing resolve per dimension over
+    # cp._SAFETY_FIELDS, so the local grouped (T1->T2->T3) order is acceptable.
+    order = profiles._SAFETY_FIELDS_ORDER
+    assert set(order) == set(cp._SAFETY_FIELDS)
+    # No duplicate entries in the local emission-order tuple.
+    assert len(order) == len(set(order))
+    # Explicit missing / extra diagnostics for a clearer failure message.
+    assert not (set(cp._SAFETY_FIELDS) - set(order)), "missing safety field(s)"
+    assert not (set(order) - set(cp._SAFETY_FIELDS)), "extra non-safety field(s)"
