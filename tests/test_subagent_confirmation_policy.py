@@ -17,6 +17,7 @@ import pytest
 
 from agent import subagent_confirmation_policy as cp
 from agent.subagent_confirmation_policy import (
+    AuditEffect,
     AuditEntry,
     AuditTrail,
     ConfirmationAssertion,
@@ -483,13 +484,17 @@ def test_merge_audit_has_one_entry_per_field_in_order():
     assert tuple(e.dimension for e in audit.entries) == SAFETY_FIELDS
     by_field = {e.dimension: e for e in audit.entries}
     for f in T1:
-        assert by_field[f].resolved is SignalValue.FALSE
+        assert by_field[f].posture_value is SignalValue.FALSE
+        assert by_field[f].merged_value is SignalValue.FALSE
         assert by_field[f].source is ConfirmationSource.CENTRAL_POLICY
         assert by_field[f].reason == f"clear {f}"
+        assert by_field[f].effect is AuditEffect.POSTURE_FALSE_APPLIED
     for f in T2 + T3:
-        assert by_field[f].resolved is SignalValue.UNKNOWN
+        assert by_field[f].posture_value is SignalValue.UNKNOWN
+        assert by_field[f].merged_value is SignalValue.UNKNOWN
         assert by_field[f].source is None
         assert by_field[f].reason is None
+        assert by_field[f].effect is AuditEffect.NO_POSTURE_CONTRIBUTION
 
 
 # --- §J audit inertness ------------------------------------------------------
@@ -505,9 +510,13 @@ def test_audit_reason_does_not_change_merge_result():
                               ConfirmationSource.CENTRAL_POLICY,
                               "delegate_task gateway https://evil rpc execute"),
     ))
-    m1, _ = merge_safety_posture(nl, p1)
-    m2, _ = merge_safety_posture(nl, p2)
+    m1, a1 = merge_safety_posture(nl, p1)
+    m2, a2 = merge_safety_posture(nl, p2)
     assert m1 == m2  # reason text is inert; never parsed
+    # effect and merged_value are also reason-independent
+    e1 = {e.dimension: (e.effect, e.merged_value) for e in a1.entries}
+    e2 = {e.dimension: (e.effect, e.merged_value) for e in a2.entries}
+    assert e1 == e2
 
 
 # --- §M determinism & order-invariance --------------------------------------
@@ -566,3 +575,152 @@ def test_confirmation_never_emits_wrapper_or_decision():
     assert type(merged).__name__ == "RequestSignals"
     assert type(audit).__name__ == "AuditTrail"
     assert not hasattr(merged, "selected_wrapper")
+
+
+# --- helpers for audit groups -----------------------------------------------
+
+def _entry_for(audit, dimension):
+    by_field = {e.dimension: e for e in audit.entries}
+    return by_field[dimension]
+
+
+def _one_assertion_posture(dimension, value, source=ConfirmationSource.CENTRAL_POLICY,
+                           reason="r"):
+    return SafePosture(assertions=(
+        ConfirmationAssertion(dimension, value, source, reason),
+    ))
+
+
+# --- Group A: AuditEffect enum exactness ------------------------------------
+
+def test_audit_effect_members_exact():
+    assert {e.name for e in AuditEffect} == {
+        "POSTURE_FALSE_OVERRIDDEN_BY_NL_TRUE",
+        "NL_TRUE_PRESERVED",
+        "POSTURE_TRUE_RAISED",
+        "POSTURE_FALSE_APPLIED",
+        "POSTURE_UNKNOWN_INERT",
+        "NO_POSTURE_CONTRIBUTION",
+    }
+    assert len(list(AuditEffect)) == 6
+
+
+# --- Group B: AuditEntry schema / field exposure ----------------------------
+
+def test_audit_entry_fields_exposed():
+    names = {f.name for f in dataclasses.fields(AuditEntry)}
+    assert names == {
+        "dimension", "nl_value", "posture_value", "merged_value",
+        "source", "reason", "effect", "overridden_by_nl_true",
+    }
+
+
+def test_audit_entry_no_timestamp_field():
+    names = {f.name for f in dataclasses.fields(AuditEntry)}
+    for temporal in ("timestamp", "ts", "time", "created_at", "expires_at", "when"):
+        assert temporal not in names
+
+
+# --- Group C: effect classifier cases ---------------------------------------
+
+def test_effect_nl_true_posture_false_overridden():
+    nl = RequestSignals(mutation_requested=SignalValue.TRUE)
+    merged, audit = merge_safety_posture(nl, _clearing_posture(("mutation_requested",)))
+    e = _entry_for(audit, "mutation_requested")
+    assert merged.mutation_requested is SignalValue.TRUE
+    assert e.effect is AuditEffect.POSTURE_FALSE_OVERRIDDEN_BY_NL_TRUE
+    assert e.overridden_by_nl_true is True
+    assert e.nl_value is SignalValue.TRUE
+    assert e.posture_value is SignalValue.FALSE
+    assert e.merged_value is SignalValue.TRUE
+
+
+def test_effect_nl_unknown_posture_false_applied():
+    merged, audit = merge_safety_posture(
+        RequestSignals(), _clearing_posture(("mutation_requested",)))
+    e = _entry_for(audit, "mutation_requested")
+    assert merged.mutation_requested is SignalValue.FALSE
+    assert e.effect is AuditEffect.POSTURE_FALSE_APPLIED
+    assert e.overridden_by_nl_true is False
+
+
+def test_effect_nl_unknown_posture_true_raised():
+    posture = _one_assertion_posture("mutation_requested", SignalValue.TRUE,
+                                     reason="raise")
+    merged, audit = merge_safety_posture(RequestSignals(), posture)
+    e = _entry_for(audit, "mutation_requested")
+    assert merged.mutation_requested is SignalValue.TRUE
+    assert e.effect is AuditEffect.POSTURE_TRUE_RAISED
+
+
+def test_effect_nl_true_posture_unknown_preserved():
+    nl = RequestSignals(mutation_requested=SignalValue.TRUE)
+    merged, audit = merge_safety_posture(nl, SafePosture())
+    e = _entry_for(audit, "mutation_requested")
+    assert merged.mutation_requested is SignalValue.TRUE
+    assert e.effect is AuditEffect.NL_TRUE_PRESERVED
+    assert e.overridden_by_nl_true is False
+
+
+def test_effect_no_posture_contribution():
+    _merged, audit = merge_safety_posture(RequestSignals(), SafePosture())
+    e = _entry_for(audit, "mutation_requested")
+    assert e.effect is AuditEffect.NO_POSTURE_CONTRIBUTION
+    assert e.source is None
+    assert e.merged_value is SignalValue.UNKNOWN
+
+
+def test_effect_posture_unknown_inert():
+    posture = _one_assertion_posture("mutation_requested", SignalValue.UNKNOWN,
+                                     reason="inert")
+    merged, audit = merge_safety_posture(RequestSignals(), posture)
+    e = _entry_for(audit, "mutation_requested")
+    assert merged.mutation_requested is SignalValue.UNKNOWN
+    assert e.effect is AuditEffect.POSTURE_UNKNOWN_INERT
+
+
+def test_effect_nl_true_posture_true_labeled_nl_true_preserved():
+    nl = RequestSignals(mutation_requested=SignalValue.TRUE)
+    posture = _one_assertion_posture("mutation_requested", SignalValue.TRUE,
+                                     reason="raise")
+    merged, audit = merge_safety_posture(nl, posture)
+    e = _entry_for(audit, "mutation_requested")
+    assert merged.mutation_requested is SignalValue.TRUE
+    assert e.effect is AuditEffect.NL_TRUE_PRESERVED  # deterministic tie-break
+    assert e.posture_value is SignalValue.TRUE  # posture raise still recorded
+
+
+# --- Group D: merged_value cross-consistency --------------------------------
+
+def test_audit_merged_value_matches_request_signals():
+    nl = RequestSignals(
+        mutation_requested=SignalValue.TRUE,
+        real_delegate_requested=SignalValue.TRUE,
+    )
+    merged, audit = merge_safety_posture(nl, _clearing_posture(T1 + T2))
+    for e in audit.entries:
+        assert e.merged_value is getattr(merged, e.dimension)
+
+
+# --- Group H additions: clear-map coverage ----------------------------------
+
+def test_every_source_keyed_in_clear_map():
+    assert set(cp._FALSE_CLEAR_BY_SOURCE) == set(ConfirmationSource)
+
+
+def test_gate_source_clear_sets_empty():
+    assert cp._FALSE_CLEAR_BY_SOURCE[ConfirmationSource.PREFLIGHT_GATE] == frozenset()
+    assert cp._FALSE_CLEAR_BY_SOURCE[ConfirmationSource.STATIC_SECURITY_GATE] == frozenset()
+
+
+def test_safety_fields_match_request_signals_declaration_order():
+    safety = {
+        "mutation_requested", "execution_requested", "runtime_start_requested",
+        "real_delegate_requested", "secret_or_forbidden_path_referenced",
+        "external_surface_requested", "external_connect_requested",
+        "git_mutation_requested", "env_mutation_requested",
+    }
+    ordered = tuple(
+        f.name for f in dataclasses.fields(RequestSignals) if f.name in safety
+    )
+    assert cp._SAFETY_FIELDS == ordered

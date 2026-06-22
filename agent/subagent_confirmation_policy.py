@@ -40,6 +40,21 @@ Tiering / MVP scope:
   clearing posture still leaves T3 ``UNKNOWN`` -> R0 / no wrapper.
 * ``PREFLIGHT_GATE`` / ``STATIC_SECURITY_GATE`` are represented in the enum but
   clear nothing in MVP.
+
+Audit and provenance:
+
+* The ``AuditTrail`` is **output-only**: it records, per safety dimension, the
+  NL value, the posture contribution, the final merged value, the contributing
+  source/reason, and a summary effect. It is never consumed by the normalizer or
+  router and can never influence routing.
+* ``reason`` is **inert**: it is copied verbatim into the audit and is never
+  parsed, matched, or used as a signal -- this prevents an NL backdoor.
+* **Source-spoofing caveat:** in pure Python the ``source`` on an assertion is
+  caller-settable; this module cannot cryptographically prove provenance. Trust
+  that a privileged source (e.g. ``CENTRAL_POLICY``) was genuinely minted by the
+  central-policy producer is a contractual guarantee to be enforced by a future
+  sanctioned producer, not by construction here.
+* No timestamp/clock is recorded, preserving determinism.
 """
 
 from __future__ import annotations
@@ -54,6 +69,7 @@ __all__ = [
     "ConfirmationSource",
     "ConfirmationAssertion",
     "SafePosture",
+    "AuditEffect",
     "AuditEntry",
     "AuditTrail",
     "validate_assertion",
@@ -184,19 +200,41 @@ class SafePosture:
     assertions: tuple[ConfirmationAssertion, ...] = ()
 
 
+class AuditEffect(Enum):
+    """Summary label for how one safety dimension's value was decided.
+
+    Audit-only. The effect explains the per-field merge outcome; it is recorded
+    for forensic review and never influences the merged ``RequestSignals``.
+    """
+
+    POSTURE_FALSE_OVERRIDDEN_BY_NL_TRUE = "posture_false_overridden_by_nl_true"
+    NL_TRUE_PRESERVED = "nl_true_preserved"
+    POSTURE_TRUE_RAISED = "posture_true_raised"
+    POSTURE_FALSE_APPLIED = "posture_false_applied"
+    POSTURE_UNKNOWN_INERT = "posture_unknown_inert"
+    NO_POSTURE_CONTRIBUTION = "no_posture_contribution"
+
+
 @dataclass(frozen=True)
 class AuditEntry:
-    """The confirmation contribution recorded for one safety dimension.
+    """The complete, self-contained audit record for one safety dimension.
 
-    ``resolved`` is the *posture's* resolved value for this dimension (what
-    confirmation contributed); the final merged value lives in the returned
-    ``RequestSignals``. ``reason`` is copied verbatim and never interpreted.
+    Records the NL input (``nl_value``), the posture's resolved contribution
+    (``posture_value``), and the final ``merged_value`` that appears in the
+    returned ``RequestSignals``, plus the contributing ``source``/``reason``, a
+    summary ``effect``, and whether a posture clear was suppressed by an NL TRUE
+    (``overridden_by_nl_true``). ``reason`` is copied verbatim and never
+    interpreted. This record is output-only and never affects routing.
     """
 
     dimension: str
-    resolved: "SignalValue"
+    nl_value: "SignalValue"
+    posture_value: "SignalValue"
+    merged_value: "SignalValue"
     source: Optional["ConfirmationSource"]
     reason: Optional[str]
+    effect: "AuditEffect"
+    overridden_by_nl_true: bool
 
 
 @dataclass(frozen=True)
@@ -208,37 +246,61 @@ class AuditTrail:
 
 def _resolve_dimension_full(
     posture: SafePosture, dimension: str
-) -> tuple["SignalValue", Optional["ConfirmationSource"], Optional[str]]:
+) -> tuple["SignalValue", Optional["ConfirmationSource"], Optional[str], bool]:
     """Danger-dominant per-field resolution over a posture.
 
     TRUE wins over FALSE; UNKNOWN assertions are inert. Selection among equal
     winners is canonicalized by ``(source.value, reason)`` so the result is
-    independent of assertion order.
+    independent of assertion order. The fourth element, ``had_assertions``,
+    reports whether any assertion targeted this dimension (used only to
+    distinguish an inert UNKNOWN posture from no contribution at all).
     """
     relevant = [a for a in posture.assertions if a.dimension == dimension]
+    had_assertions = bool(relevant)
     trues = sorted(
         (a for a in relevant if a.value is SignalValue.TRUE),
         key=lambda a: (a.source.value, a.reason),
     )
     if trues:
         a = trues[0]
-        return SignalValue.TRUE, a.source, a.reason
+        return SignalValue.TRUE, a.source, a.reason, had_assertions
     falses = sorted(
         (a for a in relevant if a.value is SignalValue.FALSE),
         key=lambda a: (a.source.value, a.reason),
     )
     if falses:
         a = falses[0]
-        return SignalValue.FALSE, a.source, a.reason
-    return SignalValue.UNKNOWN, None, None
+        return SignalValue.FALSE, a.source, a.reason, had_assertions
+    return SignalValue.UNKNOWN, None, None, had_assertions
 
 
 def resolve_dimension(posture: SafePosture, dimension: str) -> "SignalValue":
     """Return the posture's resolved ``SignalValue`` for one safety dimension."""
     if dimension not in _SAFETY_FIELDS:
         raise ValueError(f"unknown safety dimension: {dimension!r}")
-    resolved, _source, _reason = _resolve_dimension_full(posture, dimension)
+    resolved, _source, _reason, _had = _resolve_dimension_full(posture, dimension)
     return resolved
+
+
+def _audit_effect(
+    nl_value: "SignalValue", posture_value: "SignalValue", had_assertions: bool
+) -> "AuditEffect":
+    """Classify the per-field merge outcome for the audit trail.
+
+    Deterministic and total; evaluated in fixed precedence. Audit-only -- this
+    label never affects the merged ``RequestSignals``.
+    """
+    if nl_value is SignalValue.TRUE and posture_value is SignalValue.FALSE:
+        return AuditEffect.POSTURE_FALSE_OVERRIDDEN_BY_NL_TRUE
+    if nl_value is SignalValue.TRUE:
+        return AuditEffect.NL_TRUE_PRESERVED
+    if posture_value is SignalValue.TRUE:
+        return AuditEffect.POSTURE_TRUE_RAISED
+    if posture_value is SignalValue.FALSE:
+        return AuditEffect.POSTURE_FALSE_APPLIED
+    if had_assertions:
+        return AuditEffect.POSTURE_UNKNOWN_INERT
+    return AuditEffect.NO_POSTURE_CONTRIBUTION
 
 
 def merge_safety_posture(
@@ -256,7 +318,9 @@ def merge_safety_posture(
     merged_safety: dict[str, "SignalValue"] = {}
     entries: list[AuditEntry] = []
     for dimension in _SAFETY_FIELDS:
-        resolved, source, reason = _resolve_dimension_full(posture, dimension)
+        resolved, source, reason, had_assertions = _resolve_dimension_full(
+            posture, dimension
+        )
         nl_value = getattr(nl, dimension)
         if nl_value is SignalValue.TRUE or resolved is SignalValue.TRUE:
             combined = SignalValue.TRUE
@@ -265,12 +329,20 @@ def merge_safety_posture(
         else:
             combined = SignalValue.UNKNOWN
         merged_safety[dimension] = combined
+        # Audit assembly is a read-only side-record: it reflects the values
+        # computed above and never feeds back into ``merged_safety``.
         entries.append(
             AuditEntry(
                 dimension=dimension,
-                resolved=resolved,
+                nl_value=nl_value,
+                posture_value=resolved,
+                merged_value=combined,
                 source=source,
                 reason=reason,
+                effect=_audit_effect(nl_value, resolved, had_assertions),
+                overridden_by_nl_true=(
+                    resolved is SignalValue.FALSE and nl_value is SignalValue.TRUE
+                ),
             )
         )
     merged = replace(nl, **merged_safety)
